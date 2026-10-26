@@ -63,6 +63,29 @@ describe('parseOverrides', () => {
 });
 
 describe('resolveFeatures', () => {
+  it('should enable message search with Chat read permissions only', () => {
+    const { enabledTools, requiredScopes } = resolveFeatures(
+      undefined,
+      'chat.write:off',
+    );
+
+    expect(enabledTools.has('chat.searchMessages')).toBe(true);
+    expect(requiredScopes).toContain(
+      'https://www.googleapis.com/auth/chat.messages.readonly',
+    );
+    expect(requiredScopes).not.toContain(
+      'https://www.googleapis.com/auth/chat.users.readstate.readonly',
+    );
+  });
+
+  it.each(['chat.read:off', 'chat.searchMessages:off'])(
+    'should disable message search via %s',
+    (override) => {
+      const { enabledTools } = resolveFeatures(undefined, override);
+      expect(enabledTools.has('chat.searchMessages')).toBe(false);
+    },
+  );
+
   it('should return all default-ON tools when no overrides', () => {
     const { enabledTools } = resolveFeatures();
 

@@ -364,19 +364,53 @@ async function main() {
   registerTool(
     'docs.getText',
     {
-      description: 'Retrieves the text content of a Google Doc.',
+      description:
+        'Reads a Google Doc as plain text (default) or Markdown. Markdown preserves bold, italic, strikethrough, underline (HTML), headings, links, and simple tables; returns JSON with title and tabs containing tabId, title, markdown, and images metadata. Image references contain IDs for selective loading with docs.getImages; no images are downloaded here. Comments and suggestions are separate tools. Does not modify the document.',
       inputSchema: {
-        documentId: z.string().describe('The ID of the document to read.'),
+        documentId: z
+          .string()
+          .describe('The ID or URL of the document to read.'),
         tabId: z
           .string()
           .optional()
           .describe(
             'The ID of the tab to read. If not provided, returns all tabs.',
           ),
+        format: z
+          .enum(['text', 'markdown'])
+          .default('text')
+          .describe(
+            'Output format. text preserves the existing plain-text response; markdown returns formatted body content for all tabs (including nested tabs) or the selected tab.',
+          ),
       },
       ...readOnlyToolProps,
     },
     docsService.getText,
+  );
+
+  registerTool(
+    'docs.getImages',
+    {
+      description:
+        'Reads embedded images from a Google Doc and returns MCP image content for a vision-capable model. First use docs.getText with format markdown to discover image IDs. Supports inline and floating images across nested tabs. Defaults to the first 5 images; select imageIds to inspect others. Limits: 5 images, 5 MiB each, 10 MiB total. Does not modify the document.',
+      inputSchema: {
+        documentId: z.string().describe('The document ID or URL.'),
+        tabId: z
+          .string()
+          .optional()
+          .describe('Read images only from this tab.'),
+        imageIds: z
+          .array(z.string().trim().min(1))
+          .min(1)
+          .max(5)
+          .optional()
+          .describe(
+            'Image IDs from docs.getText Markdown output; omit to load the first 5 images.',
+          ),
+      },
+      ...readOnlyToolProps,
+    },
+    docsService.getImages,
   );
 
   registerTool(
@@ -1431,6 +1465,42 @@ async function main() {
       ...readOnlyToolProps,
     },
     chatService.getMessages,
+  );
+
+  registerTool(
+    'chat.searchMessages',
+    {
+      description:
+        'Searches Google Chat messages server-side across conversations the signed-in user has joined. Prefer this over listing messages to find keywords, then use chat.getMessages with a returned thread name for context. Returns one page of results (each contains a message) and an optional nextPageToken, newest first. Search excludes app-posted messages in spaces/group chats, Chat app DMs, private messages, blocked senders, and muted spaces; results are not exhaustive.',
+      inputSchema: {
+        filter: z
+          .string()
+          .min(1)
+          .max(1000)
+          .refine(
+            (value) => value.trim().length > 0,
+            'Search query must not be blank.',
+          )
+          .describe(
+            'Google Chat API search query, not Gmail/UI search syntax. Examples: deployment; deployment AND space.name = "spaces/AAAAN2J52O8"; sender.name = "users/person@example.com" AND create_time >= "2026-01-01T00:00:00Z". Also supports space.display_name:Project (top five matching spaces only), attachment:*, and has_link(). Combine different fields with AND. is_unread() requires an additional chat.users.readstate.readonly scope not requested by this tool.',
+          ),
+        pageSize: z
+          .number()
+          .int()
+          .min(1)
+          .max(100)
+          .optional()
+          .describe('Maximum results per page, from 1 to 100. Defaults to 25.'),
+        pageToken: z
+          .string()
+          .optional()
+          .describe(
+            'nextPageToken from a previous search. Keep filter and pageSize unchanged when fetching the next page.',
+          ),
+      },
+      ...readOnlyToolProps,
+    },
+    chatService.searchMessages,
   );
 
   registerTool(

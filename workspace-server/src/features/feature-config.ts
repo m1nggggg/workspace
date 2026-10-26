@@ -61,7 +61,7 @@ export const FEATURE_GROUPS: readonly FeatureGroup[] = [
     service: 'docs',
     group: 'read',
     scopes: scopes('documents'),
-    tools: ['docs.getSuggestions', 'docs.getText'],
+    tools: ['docs.getSuggestions', 'docs.getText', 'docs.getImages'],
     defaultEnabled: true,
   },
   {
@@ -142,6 +142,7 @@ export const FEATURE_GROUPS: readonly FeatureGroup[] = [
       'chat.listSpaces',
       'chat.findSpaceByName',
       'chat.getMessages',
+      'chat.searchMessages',
       'chat.findDmByEmail',
       'chat.listThreads',
     ],

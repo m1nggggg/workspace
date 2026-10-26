@@ -25,6 +25,7 @@ describe('ChatService', () => {
   let mockAuthManager: jest.Mocked<AuthManager>;
   let mockChatAPI: any;
   let mockPeopleAPI: any;
+  let mockSearchRequest: any;
 
   beforeEach(() => {
     // Clear all mocks before each test
@@ -65,7 +66,11 @@ describe('ChatService', () => {
     // Create ChatService instance
     chatService = new ChatService(mockAuthManager);
 
-    const mockAuthClient = { access_token: 'test-token' };
+    mockSearchRequest = jest.fn();
+    const mockAuthClient = {
+      access_token: 'test-token',
+      request: mockSearchRequest,
+    };
     mockAuthManager.getAuthenticatedClient.mockResolvedValue(
       mockAuthClient as any,
     );
@@ -117,6 +122,138 @@ describe('ChatService', () => {
         'An error occurred while listing chat spaces.',
       );
       expect(response.details).toBe('Chat API failed');
+    });
+  });
+
+  describe('searchMessages', () => {
+    it('should search server-side with a bounded default page size', async () => {
+      const results = [
+        {
+          message: {
+            name: 'spaces/space1/messages/msg1',
+            text: 'Deployment completed',
+            thread: { name: 'spaces/space1/threads/thread1' },
+          },
+        },
+      ];
+      mockSearchRequest.mockResolvedValue({ data: { results } });
+
+      const result = await chatService.searchMessages({ filter: 'deployment' });
+
+      expect(mockSearchRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          url: 'https://chat.googleapis.com/v1/spaces/-/messages:search',
+          method: 'POST',
+          timeout: 30000,
+          data: { filter: 'deployment', pageSize: 25 },
+        }),
+      );
+      expect(JSON.parse(result.content[0].text)).toEqual({ results });
+      expect(result.isError).toBeUndefined();
+      expect(mockChatAPI.spaces.list).not.toHaveBeenCalled();
+      expect(mockChatAPI.spaces.messages.list).not.toHaveBeenCalled();
+      expect(mockChatAPI.spaces.setup).not.toHaveBeenCalled();
+      expect(mockChatAPI.spaces.messages.create).not.toHaveBeenCalled();
+    });
+
+    it('should preserve filters and return one page without auto-pagination', async () => {
+      const filter =
+        'deployment AND space.name = "spaces/space1" AND create_time >= "2026-01-01T00:00:00Z"';
+      mockSearchRequest.mockResolvedValue({
+        data: { results: [], nextPageToken: 'next-page' },
+      });
+
+      const result = await chatService.searchMessages({
+        filter,
+        pageSize: 50,
+        pageToken: 'previous-page',
+      });
+
+      expect(mockSearchRequest).toHaveBeenCalledTimes(1);
+      expect(mockSearchRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: { filter, pageSize: 50, pageToken: 'previous-page' },
+        }),
+      );
+      expect(JSON.parse(result.content[0].text)).toEqual({
+        results: [],
+        nextPageToken: 'next-page',
+      });
+    });
+
+    it('should normalize absent results to an empty array', async () => {
+      mockSearchRequest.mockResolvedValue({ data: {} });
+
+      const result = await chatService.searchMessages({ filter: 'not-found' });
+
+      expect(JSON.parse(result.content[0].text)).toEqual({ results: [] });
+    });
+
+    it.each(['', '   ', 'x'.repeat(1001)])(
+      'should reject an empty or oversized filter before authentication (%#)',
+      async (filter) => {
+        const result = await chatService.searchMessages({ filter });
+
+        expect(result.isError).toBe(true);
+        expect(mockAuthManager.getAuthenticatedClient).not.toHaveBeenCalled();
+        expect(mockSearchRequest).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([0, -1, 1.5, 101, NaN, Infinity])(
+      'should reject invalid page sizes (%s)',
+      async (pageSize) => {
+        const result = await chatService.searchMessages({
+          filter: 'deployment',
+          pageSize,
+        });
+
+        expect(result.isError).toBe(true);
+        expect(mockAuthManager.getAuthenticatedClient).not.toHaveBeenCalled();
+      },
+    );
+
+    it('should accept the maximum supported page size', async () => {
+      mockSearchRequest.mockResolvedValue({ data: {} });
+
+      const result = await chatService.searchMessages({
+        filter: 'deployment',
+        pageSize: 100,
+      });
+
+      expect(result.isError).toBeUndefined();
+      expect(mockSearchRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: { filter: 'deployment', pageSize: 100 },
+        }),
+      );
+    });
+
+    it('should report API errors without falling back to listing messages', async () => {
+      mockSearchRequest.mockRejectedValue(new Error('Permission denied'));
+
+      const result = await chatService.searchMessages({ filter: 'deployment' });
+
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0].text)).toEqual({
+        error: 'An error occurred while searching messages.',
+        details: 'Permission denied',
+      });
+      expect(mockChatAPI.spaces.messages.list).not.toHaveBeenCalled();
+    });
+
+    it('should report authentication errors', async () => {
+      mockAuthManager.getAuthenticatedClient.mockRejectedValue(
+        new Error('Authentication required'),
+      );
+
+      const result = await chatService.searchMessages({ filter: 'deployment' });
+
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0].text).details).toBe(
+        'Authentication required',
+      );
+      expect(mockSearchRequest).not.toHaveBeenCalled();
     });
   });
 

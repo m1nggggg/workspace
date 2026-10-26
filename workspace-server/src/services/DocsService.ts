@@ -10,12 +10,32 @@ import { logToFile } from '../utils/logger';
 import { extractDocId } from '../utils/IdUtils';
 import { gaxiosOptions } from '../utils/GaxiosConfig';
 import { extractDocumentId as validateAndExtractDocId } from '../utils/validation';
+import { renderDocsMarkdown } from '../utils/DocsMarkdown';
+import {
+  collectDocImages,
+  docImageMetadata,
+  downloadDocImage,
+  MAX_DOC_IMAGES,
+  MAX_DOC_IMAGE_BYTES,
+  MAX_DOC_TOTAL_IMAGE_BYTES,
+} from '../utils/DocsImages';
 
 // Field mask for documents.get when reading tab content. Selects only the
 // structural fields we use; broader masks like 'tabs' alone trigger
 // "comment-specific fields" errors when combined with includeTabsContent.
 export const TABS_FIELD_MASK =
   'tabs(tabProperties,documentTab(body,headers,footers,footnotes))';
+
+// Docs supports three tab levels. Explicit subfields avoid requesting
+// comment-specific fields while including every level of nested tab content.
+// These are maps keyed by object ID, not ordinary nested message fields.
+// Google rejects selectors such as inlineObjects(inlineObjectProperties(...)).
+// Request the maps whole, then expose only safe metadata to callers.
+const IMAGE_OBJECT_FIELDS = 'inlineObjects,positionedObjects';
+const IMAGE_TAB_FIELDS = `tabProperties,documentTab(${IMAGE_OBJECT_FIELDS})`;
+const IMAGE_FIELDS = `title,tabs(${IMAGE_TAB_FIELDS},childTabs(${IMAGE_TAB_FIELDS},childTabs(${IMAGE_TAB_FIELDS})))`;
+const RICH_TEXT_TAB_FIELDS = `tabProperties,documentTab(body,${IMAGE_OBJECT_FIELDS})`;
+const RICH_TEXT_FIELDS = `title,tabs(${RICH_TEXT_TAB_FIELDS},childTabs(${RICH_TEXT_TAB_FIELDS},childTabs(${RICH_TEXT_TAB_FIELDS})))`;
 
 interface BaseDocsSuggestion {
   text: string;
@@ -533,13 +553,188 @@ export class DocsService {
     }
   };
 
-  public getText = async ({
+  public getImages = async ({
+    documentId,
+    tabId,
+    imageIds,
+  }: {
+    documentId: string;
+    tabId?: string;
+    imageIds?: string[];
+  }) => {
+    type Content =
+      | { type: 'text'; text: string }
+      | { type: 'image'; mimeType: string; data: string };
+    try {
+      if (
+        imageIds &&
+        (!imageIds.length ||
+          imageIds.length > MAX_DOC_IMAGES ||
+          imageIds.some((id) => !id.trim()))
+      ) {
+        throw new Error(`Select between 1 and ${MAX_DOC_IMAGES} image IDs.`);
+      }
+      const docs = await this.getDocsClient();
+      const res = await docs.documents.get({
+        documentId: validateAndExtractDocId(documentId),
+        fields: IMAGE_FIELDS,
+        includeTabsContent: true,
+        suggestionsViewMode: 'PREVIEW_WITHOUT_SUGGESTIONS',
+      });
+      let tabs = this._flattenTabs(res.data.tabs || []);
+      if (tabId !== undefined) {
+        tabs = tabs.filter((tab) => tab.tabProperties?.tabId === tabId);
+        if (!tabs.length) throw new Error(`Tab with ID ${tabId} not found.`);
+      }
+      const images = tabs.flatMap(collectDocImages);
+      const selected = imageIds
+        ? images.filter((image) => imageIds.includes(image.imageId))
+        : images.slice(0, MAX_DOC_IMAGES);
+      if (selected.length > MAX_DOC_IMAGES)
+        throw new Error('Too many matching images; specify a tabId.');
+      const results: Record<string, unknown>[] = [];
+      const content: Content[] = [];
+      let totalBytes = 0;
+      for (const image of selected) {
+        const metadata = docImageMetadata(image);
+        try {
+          if (!image.contentUri) throw new Error('Missing image URL.');
+          if (totalBytes >= MAX_DOC_TOTAL_IMAGE_BYTES)
+            throw new Error('Total image size limit reached.');
+          const { bytes, mimeType } = await downloadDocImage(
+            image.contentUri,
+            Math.min(
+              MAX_DOC_IMAGE_BYTES,
+              MAX_DOC_TOTAL_IMAGE_BYTES - totalBytes,
+            ),
+          );
+          totalBytes += bytes.length;
+          results.push({ ...metadata, status: 'loaded', mimeType });
+          content.push(
+            { type: 'text', text: JSON.stringify(metadata) },
+            { type: 'image', mimeType, data: bytes.toString('base64') },
+          );
+        } catch {
+          // Network errors can contain signed URLs. Never return or log them.
+          results.push({
+            ...metadata,
+            status: 'error',
+            error:
+              'Image unavailable, unsupported, or exceeds download limits.',
+          });
+        }
+      }
+      for (const id of new Set(imageIds || [])) {
+        if (!images.some((image) => image.imageId === id)) {
+          results.push({
+            imageId: id,
+            status: 'error',
+            error: 'Image ID not found in the selected tabs.',
+          });
+        }
+      }
+      const failed = results.some((result) => result.status === 'error');
+      return {
+        ...(failed && !content.length ? { isError: true } : {}),
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify({
+              title: res.data.title,
+              images: results,
+              remaining: images.length - selected.length,
+            }),
+          },
+          ...content,
+        ],
+      };
+    } catch {
+      return {
+        isError: true,
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify({
+              error:
+                'Unable to load document images. Check document access, tabId, and image selection (maximum 5 IDs).',
+            }),
+          },
+        ],
+      };
+    }
+  };
+
+  private _getMarkdown = async ({
     documentId,
     tabId,
   }: {
     documentId: string;
     tabId?: string;
   }) => {
+    try {
+      const id = validateAndExtractDocId(documentId);
+      const docs = await this.getDocsClient();
+      const res = await docs.documents.get({
+        documentId: id,
+        fields: RICH_TEXT_FIELDS,
+        includeTabsContent: true,
+        suggestionsViewMode: 'PREVIEW_WITHOUT_SUGGESTIONS',
+      });
+      let tabs = this._flattenTabs(res.data.tabs || []);
+      if (tabId !== undefined) {
+        tabs = tabs.filter((tab) => tab.tabProperties?.tabId === tabId);
+        if (!tabs.length) throw new Error(`Tab with ID ${tabId} not found.`);
+      }
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify(
+              {
+                title: res.data.title,
+                tabs: tabs.map((tab) => ({
+                  tabId: tab.tabProperties?.tabId,
+                  title: tab.tabProperties?.title,
+                  markdown: renderDocsMarkdown(
+                    tab.documentTab?.body?.content || [],
+                  ),
+                  images: collectDocImages(tab).map(docImageMetadata),
+                })),
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      logToFile(
+        `[DocsService] Error during docs.getText (markdown): ${errorMessage}`,
+      );
+      return {
+        isError: true,
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify({ error: errorMessage }),
+          },
+        ],
+      };
+    }
+  };
+
+  public getText = async ({
+    documentId,
+    tabId,
+    format = 'text',
+  }: {
+    documentId: string;
+    tabId?: string;
+    format?: 'text' | 'markdown';
+  }) => {
+    if (format === 'markdown') return this._getMarkdown({ documentId, tabId });
     logToFile(
       `[DocsService] Starting getText for document: ${documentId}, tabId: ${tabId}`,
     );

@@ -14,8 +14,56 @@ import {
   featureGroupKey,
   getAllPossibleScopes,
 } from '../../features/feature-config';
+import { resolveFeatures } from '../../features/feature-resolver';
 
 describe('feature-config', () => {
+  it('enables image reading in docs.read without additional scopes', () => {
+    const { enabledTools, requiredScopes } = resolveFeatures(
+      undefined,
+      'docs.write:off',
+    );
+    expect(enabledTools.has('docs.getImages')).toBe(true);
+    expect(
+      requiredScopes.filter((scope) => scope.includes('/documents')),
+    ).toEqual(['https://www.googleapis.com/auth/documents']);
+    expect(
+      resolveFeatures(undefined, 'docs.read:off').enabledTools.has(
+        'docs.getImages',
+      ),
+    ).toBe(false);
+    expect(
+      resolveFeatures(undefined, 'docs.getImages:off').enabledTools.has(
+        'docs.getImages',
+      ),
+    ).toBe(false);
+  });
+
+  it('enables rich-text reading without enabling Docs write tools or adding scopes', () => {
+    const { enabledTools, requiredScopes } = resolveFeatures(
+      undefined,
+      'docs.write:off',
+    );
+    const docsRead = FEATURE_GROUPS.find(
+      (fg) => fg.service === 'docs' && fg.group === 'read',
+    )!;
+    expect(docsRead.tools).toContain('docs.getText');
+    expect(enabledTools.has('docs.getText')).toBe(true);
+    expect(enabledTools.has('docs.getRichText')).toBe(false);
+    expect(enabledTools.has('docs.create')).toBe(false);
+    expect(
+      requiredScopes.filter((scope) => scope.includes('/documents')),
+    ).toEqual([...docsRead.scopes]);
+  });
+
+  it.each(['docs.read:off', 'docs.getText:off'])(
+    'disables rich-text reading via %s',
+    (override) => {
+      expect(
+        resolveFeatures(undefined, override).enabledTools.has('docs.getText'),
+      ).toBe(false);
+    },
+  );
+
   it('should have unique feature group keys', () => {
     const keys = FEATURE_GROUPS.map(featureGroupKey);
     expect(keys.length).toBe(new Set(keys).size);

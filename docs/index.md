@@ -17,9 +17,39 @@ The extension provides the following tools:
 
 - `docs.create`: Creates a new Google Doc.
 - `docs.getSuggestions`: Retrieves suggested edits from a Google Doc.
-- `docs.getComments`: Retrieves comments from a Google Doc.
+- `drive.getComments`: Retrieves comments and replies from a Google Doc or other
+  Drive file, including resolved status and quoted text where available.
 - `docs.writeText`: Writes text to a Google Doc at a specified position.
-- `docs.getText`: Retrieves the text content of a Google Doc.
+- `docs.getText`: Reads a Google Doc without modifying it. Accepts a document ID
+  or URL, an optional `tabId`, and `format` (`text` or `markdown`). The default
+  `text` format preserves the existing plain-text response behavior. With
+  `format: "markdown"`, reads document body content preserving bold, italic,
+  strikethrough (`~~text~~`), underline (`<u>text</u>`), headings (levels 1–6),
+  links, and simple tables. In Markdown mode, omitting `tabId` includes all
+  tabs, including nested tabs. This mode returns JSON containing the document
+  `title` and a `tabs` array with `tabId`, `title`, and `markdown` for each tab.
+  Uses existing Docs permissions and belongs to the `docs.read` feature group.
+  - Comments are read separately using `drive.getComments`; suggested changes
+    are excluded from this preview and are read using `docs.getSuggestions`.
+  - This is a best-effort text representation, not a visual export. Font sizes,
+    colors, page layout, headers, footers, and footnotes are not preserved;
+    images are references (`[Image: imageId]`), with an `images` metadata array
+    on each tab. Floating images are referenced at their paragraph anchor. Lists
+    use unordered Markdown bullets. Tables use their first row as the Markdown
+    header; merged cells and nested table layouts are not faithfully
+    represented.
+- `docs.getImages`: Reads inline and floating images as MCP image content for a
+  vision-capable model; does not modify the document. First call `docs.getText`
+  with `format: "markdown"` to discover image IDs, then call `docs.getImages`
+  with `documentId`, optional `tabId`, and optional `imageIds`. Without
+  `imageIds`, loads the first five images across all (including nested) tabs, or
+  the selected tab. Select specific IDs to load other images. Limits: five
+  images per call, 5 MiB per image, 10 MiB total (before base64). Returns image
+  labels, per-image status/errors, a remaining count, and image content. PNG,
+  JPEG, GIF, and WebP are accepted. Temporary Google image URLs are fetched
+  fresh and are not returned or logged. Uses existing Docs permissions and the
+  `docs.read` feature group. The client/model must support image tool results;
+  this tool does not perform OCR or call a separate model.
 - `docs.replaceText`: Replaces all occurrences of a given text with new text in
   a Google Doc.
 - `docs.formatText`: Applies formatting (bold, italic, headings, etc.) to text
@@ -68,6 +98,18 @@ The extension provides the following tools:
 - `chat.findSpaceByName`: Finds a Google Chat space by its display name.
 - `chat.sendMessage`: Sends a message to a Google Chat space.
 - `chat.getMessages`: Gets messages from a Google Chat space.
+- `chat.searchMessages`: Searches message contents server-side across joined
+  conversations. Accepts a required `filter`, optional `pageSize` (1–100,
+  default 25), and optional `pageToken`. Returns `results` (each containing a
+  `message`) and an optional `nextPageToken`, newest first. For example:
+  `{"filter":"deployment AND space.name = \"spaces/AAAAN2J52O8\""}`. Keep the
+  filter and page size unchanged when paging. Uses existing Chat read
+  permissions; `is_unread()` requires an additional read-state permission that
+  this tool does not request. Google search excludes app-posted messages in
+  spaces/group chats, Chat app DMs, private messages, blocked senders, and muted
+  spaces. Use `chat.getMessages` to read thread context or list messages that
+  search excludes. See
+  [Google's search guide](https://developers.google.com/workspace/chat/search-messages).
 - `chat.sendDm`: Sends a direct message to a user.
 - `chat.findDmByEmail`: Finds a Google Chat DM space by a user's email address.
 - `chat.listThreads`: Lists threads from a Google Chat space in reverse

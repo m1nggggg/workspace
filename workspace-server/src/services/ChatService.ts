@@ -18,6 +18,19 @@ interface GetMessagesParams {
   threadName?: string;
 }
 
+interface SearchMessagesParams {
+  filter: string;
+  pageSize?: number;
+  pageToken?: string;
+}
+
+// The installed googleapis discovery client doesn't expose SearchMessages yet.
+// REST contract: https://developers.google.com/workspace/chat/search-messages
+interface SearchMessagesResponse {
+  results?: { message?: chat_v1.Schema$Message }[];
+  nextPageToken?: string;
+}
+
 export class ChatService {
   constructor(private authManager: AuthManager) {}
 
@@ -311,6 +324,65 @@ export class ChatService {
             type: 'text' as const,
             text: JSON.stringify({
               error: 'An error occurred while listing messages.',
+              details: errorMessage,
+            }),
+          },
+        ],
+      };
+    }
+  };
+
+  public searchMessages = async ({
+    filter,
+    pageSize = 25,
+    pageToken,
+  }: SearchMessagesParams) => {
+    logToFile('Searching Google Chat messages');
+    try {
+      if (!filter.trim() || filter.length > 1000) {
+        throw new Error(
+          'filter must contain 1 to 1000 characters of search query.',
+        );
+      }
+      if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) {
+        throw new Error('pageSize must be an integer between 1 and 100.');
+      }
+
+      const auth = await this.authManager.getAuthenticatedClient();
+      // This POST only reads data. Keep pagination caller-controlled so a
+      // search cannot silently scan all conversations or return unbounded data.
+      const res = await auth.request<SearchMessagesResponse>({
+        ...gaxiosOptions,
+        url: 'https://chat.googleapis.com/v1/spaces/-/messages:search',
+        method: 'POST',
+        data: { filter, pageSize, pageToken },
+      });
+      const results = res.data.results || [];
+      logToFile(`Successfully returned ${results.length} chat search results.`);
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify({
+              results,
+              nextPageToken: res.data.nextPageToken,
+            }),
+          },
+        ],
+      };
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      // Don't log the query, message bodies, or the HTTP error object, which
+      // can contain the authenticated request and its search data.
+      logToFile('Error during chat.searchMessages');
+      return {
+        isError: true,
+        content: [
+          {
+            type: 'text' as const,
+            text: JSON.stringify({
+              error: 'An error occurred while searching messages.',
               details: errorMessage,
             }),
           },
